@@ -13,7 +13,6 @@ from collections import defaultdict
 # Load environment variables
 load_dotenv()
 
-
 # Initialize Supabase
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
@@ -23,6 +22,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY) if SUPABASE_URL and SU
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
+
+# Constants
+MAX_STOPS_PER_ROUTE = 60  # Adjust this value as needed
 
 # Haversine formula to calculate distance
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -64,6 +66,8 @@ def assign_stops_to_depots(depots: List[Depot], stops: List[BusStop]) -> Dict[st
     clusters = {}
     for depot in depots:
         clusters[depot.id] = {"depot": depot, "stops": []}
+        logging.info(f"Depot {depot.id} assigned {len(clusters[depot.id]['stops'])} stops")
+
 
     for stop in stops:
         min_dist = float('inf')
@@ -78,7 +82,6 @@ def assign_stops_to_depots(depots: List[Depot], stops: List[BusStop]) -> Dict[st
 
     return clusters
 
-
 def generate_tsp_file(depots: List[Depot], stops: List[BusStop]) -> str:
     all_points = depots + sorted(stops, key=lambda stop: stop.priority, reverse=True)
     tsp_content = f"NAME : BusRoute\nTYPE : TSP\nDIMENSION : {len(all_points)}\nEDGE_WEIGHT_TYPE : EUC_2D\nNODE_COORD_SECTION\n"
@@ -91,17 +94,18 @@ def generate_par_file(tsp_filename: str, num_vehicles: int, route_filename: str)
     return f"""PROBLEM_FILE = {tsp_filename}
 SALESMEN = {num_vehicles}
 DEPOT = 1
-EXCESS = 0.10
+EXCESS = 0.15  # Increased flexibility
 GAIN23 = YES
-INITIAL_TOUR_ALGORITHM = CVRP
+INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
+CANDIDATE_SET_TYPE = NEAREST-NEIGHBOR
 KICKS = 3
 MAX_TRIALS = 500
 MOVE_TYPE = 5
-MTSP_MIN_SIZE = 5
-MTSP_MAX_SIZE = 20
+MTSP_MIN_SIZE = 15  
+MTSP_MAX_SIZE = 30
 POPMUSIC_INITIAL_TOUR = YES
 TIME_LIMIT = 300.0
-MTSP_OBJECTIVE = MINMAX
+MTSP_OBJECTIVE = MINMAX_SIZE  
 MTSP_SOLUTION_FILE = {route_filename}
 """
 
@@ -141,10 +145,8 @@ async def optimize_route():
         depots = [Depot(**depot) for depot in depots_data]
         stops = [BusStop(**stop) for stop in stops_data]
 
-        # Cluster stops by nearest depot
         clusters = assign_stops_to_depots(depots, stops)
 
-        # Number of vehicles per cluster (adjust as needed)
         lkh_folder = "/LKH-3/LKH-3.0.13"
         lkh_path = os.path.join(lkh_folder, "LKH")
         routes_info = []
@@ -156,9 +158,10 @@ async def optimize_route():
                 logging.info(f"Skipping depot {depot.id} with no stops.")
                 continue
             
-            cluster_vehicles = max(1, math.ceil(len(cluster_stops) / 20)) # can apply slider to change the value of max stops
+            # Calculate number of vehicles based on MAX_STOPS_PER_ROUTE
+            cluster_vehicles = max(1, math.ceil(len(cluster_stops) / MAX_STOPS_PER_ROUTE))
 
-            # Generate unique filenames for this cluster
+
             cluster_id = depot.id
             tsp_filename = f"BusRoute_{cluster_id}.tsp"
             tsp_path = os.path.join(lkh_folder, tsp_filename)
@@ -193,7 +196,7 @@ async def optimize_route():
             # Calculate route info
             for route in cluster_routes:
                 total_distance = sum(haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"]) for i in range(len(route)-1))
-                stops_count = len(route) - 1  # Excluding depot
+                stops_count = len(route) - 2  # Correctly exclude depot start and end
                 routes_info.append({
                     "waypoints": route,
                     "distance": round(total_distance, 2),
@@ -203,6 +206,7 @@ async def optimize_route():
                     "num_vehicles": cluster_vehicles
                 })
 
+        # Update database
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
             supabase.table("optimized_routes").delete().eq("id", record["id"]).execute()
