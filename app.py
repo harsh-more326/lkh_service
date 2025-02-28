@@ -13,6 +13,7 @@ from collections import defaultdict
 # Load environment variables
 load_dotenv()
 
+
 # Initialize Supabase
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
@@ -43,6 +44,21 @@ class Depot(BaseModel):
     id: str
     latitude: float
     longitude: float
+    
+def fetch_all_rows(table_name: str):
+    all_rows = []
+    chunk_size = 500  # Supabase default limit
+    start = 0
+
+    while True:
+        response = supabase.table(table_name).select("*").range(start, start + chunk_size - 1).execute()
+        if response.data:
+            all_rows.extend(response.data)
+            start += chunk_size
+        else:
+            break  # Stop when no more data
+
+    return all_rows
 
 def assign_stops_to_depots(depots: List[Depot], stops: List[BusStop]) -> Dict[str, Dict]:
     clusters = {}
@@ -116,21 +132,19 @@ def parse_lkh_output(route_file_path: str, all_points: List) -> List[List[Dict]]
 @app.get("/optimize")
 async def optimize_route():
     try:
-        # Fetch data from Supabase
-        depots_data = supabase.table("depots").select("*").execute()
-        stops_data = supabase.table("bus_stops").select("*").execute()
-
-        if not depots_data.data or not stops_data.data:
+        depots_data = fetch_all_rows("depots")
+        stops_data = fetch_all_rows("bus_stops")
+       
+        if not depots_data or not stops_data:
             raise HTTPException(status_code=404, detail="No depots or bus stops found.")
 
-        depots = [Depot(**depot) for depot in depots_data.data]
-        stops = [BusStop(**stop) for stop in stops_data.data]
+        depots = [Depot(**depot) for depot in depots_data]
+        stops = [BusStop(**stop) for stop in stops_data]
 
         # Cluster stops by nearest depot
         clusters = assign_stops_to_depots(depots, stops)
 
         # Number of vehicles per cluster (adjust as needed)
-        num_vehicles = 3
         lkh_folder = "/LKH-3/LKH-3.0.13"
         lkh_path = os.path.join(lkh_folder, "LKH")
         routes_info = []
@@ -141,6 +155,8 @@ async def optimize_route():
             if not cluster_stops:
                 logging.info(f"Skipping depot {depot.id} with no stops.")
                 continue
+            
+            cluster_vehicles = max(1, math.ceil(len(cluster_stops) / 20)) # can apply slider to change the value of max stops
 
             # Generate unique filenames for this cluster
             cluster_id = depot.id
@@ -156,7 +172,7 @@ async def optimize_route():
             with open(tsp_path, 'w') as f:
                 f.write(tsp_content)
 
-            par_content = generate_par_file(tsp_filename, num_vehicles, route_filename)
+            par_content = generate_par_file(tsp_filename, cluster_vehicles, route_filename)
             with open(par_path, 'w') as f:
                 f.write(par_content)
 
@@ -176,36 +192,30 @@ async def optimize_route():
 
             # Calculate route info
             for route in cluster_routes:
-                total_distance = sum(
-                    haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"])
-                    for i in range(len(route)-1)
-                )
+                total_distance = sum(haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"]) for i in range(len(route)-1))
+                stops_count = len(route) - 1  # Excluding depot
                 routes_info.append({
                     "waypoints": route,
                     "distance": round(total_distance, 2),
                     "duration": int(total_distance * 2),
-                    "depot_id": cluster_id
+                    "depot_id": depot_id,
+                    "stops_number": stops_count,
+                    "num_vehicles": cluster_vehicles
                 })
 
-            # Cleanup files
-            for file_path in [tsp_path, par_path, route_file_path]:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-
-        # Clear existing routes
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
             supabase.table("optimized_routes").delete().eq("id", record["id"]).execute()
 
-        # Insert new routes
         for route in routes_info:
             supabase.table("optimized_routes").insert({
                 "name": f"Optimized Route (Depot {route['depot_id']})",
                 "stops": json.dumps({"waypoints": route['waypoints']}),
                 "distance": route["distance"],
                 "duration": route["duration"],
-                "buses": num_vehicles,
-                "frequency": 1
+                "buses": route["num_vehicles"],
+                "frequency": 1,
+                "stops_number": route["stops_number"]
             }).execute()
 
         return {"routes": routes_info}
