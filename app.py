@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import json
 import math
 import logging
+import time  # Import time module
 from collections import defaultdict
 
 # Load environment variables
@@ -24,7 +25,7 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # Constants
-MAX_STOPS_PER_ROUTE = 60  # Adjust this value as needed
+MAX_STOPS_PER_ROUTE = 30  # Adjust this value as needed
 
 # Haversine formula to calculate distance
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -102,7 +103,7 @@ KICKS = 3
 MAX_TRIALS = 500
 MOVE_TYPE = 5
 MTSP_MIN_SIZE = 15  
-MTSP_MAX_SIZE = 30
+MTSP_MAX_SIZE = {MAX_STOPS_PER_ROUTE}
 POPMUSIC_INITIAL_TOUR = YES
 TIME_LIMIT = 300.0
 MTSP_OBJECTIVE = MINMAX_SIZE  
@@ -136,6 +137,8 @@ def parse_lkh_output(route_file_path: str, all_points: List) -> List[List[Dict]]
 @app.get("/optimize")
 async def optimize_route():
     try:
+        start_time = time.time()
+
         depots_data = fetch_all_rows("depots")
         stops_data = fetch_all_rows("bus_stops")
        
@@ -157,10 +160,8 @@ async def optimize_route():
             if not cluster_stops:
                 logging.info(f"Skipping depot {depot.id} with no stops.")
                 continue
-            
-            # Calculate number of vehicles based on MAX_STOPS_PER_ROUTE
-            cluster_vehicles = max(1, math.ceil(len(cluster_stops) / MAX_STOPS_PER_ROUTE))
 
+            cluster_vehicles = max(1, math.ceil(len(cluster_stops) / MAX_STOPS_PER_ROUTE))
 
             cluster_id = depot.id
             tsp_filename = f"BusRoute_{cluster_id}.tsp"
@@ -179,13 +180,11 @@ async def optimize_route():
             with open(par_path, 'w') as f:
                 f.write(par_content)
 
-            # Run LKH-3
             result = subprocess.run([lkh_path, par_path], capture_output=True, text=True)
             if result.returncode != 0:
                 logging.error(f"LKH-3 error for {cluster_id}: {result.stderr}")
                 continue
 
-            # Parse routes
             all_points_cluster = [depot] + sorted(cluster_stops, key=lambda s: s.priority, reverse=True)
             try:
                 cluster_routes = parse_lkh_output(route_file_path, all_points_cluster)
@@ -193,10 +192,9 @@ async def optimize_route():
                 logging.error(f"Parse error for {cluster_id}: {str(e)}")
                 continue
 
-            # Calculate route info
             for route in cluster_routes:
                 total_distance = sum(haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"]) for i in range(len(route)-1))
-                stops_count = len(route) - 2  # Correctly exclude depot start and end
+                stops_count = len(route) - 2
                 routes_info.append({
                     "waypoints": route,
                     "distance": round(total_distance, 2),
@@ -206,7 +204,6 @@ async def optimize_route():
                     "num_vehicles": cluster_vehicles
                 })
 
-        # Update database
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
             supabase.table("optimized_routes").delete().eq("id", record["id"]).execute()
@@ -221,8 +218,15 @@ async def optimize_route():
                 "frequency": 1,
                 "stops_number": route["stops_number"]
             }).execute()
-
-        return {"routes": routes_info}
+        
+        end_time = time.time()
+        execution_time = end_time - start_time
+        minutes = int(execution_time // 60)
+        seconds = execution_time % 60
+        return {
+            "routes": routes_info,
+            "execution_time": f"{minutes} min {seconds:.2f} sec"
+        }
 
     except Exception as e:
         logging.error(f"Error: {str(e)}")
