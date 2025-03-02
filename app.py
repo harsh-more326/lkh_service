@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # Constants
-MAX_STOPS_PER_ROUTE = 30  # Adjust this value as needed
+MAX_STOPS_PER_ROUTE = 50  # Adjust this value as needed
 
 # Haversine formula to calculate distance
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -97,8 +97,10 @@ SALESMEN = {num_vehicles}
 DEPOT = 1
 EXCESS = 0.15  # Increased flexibility
 GAIN23 = YES
-INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
 CANDIDATE_SET_TYPE = NEAREST-NEIGHBOR
+PATCHING_A = 2 RESTRICTED
+PATCHING_C = 2 RESTRICTED
+INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
 KICKS = 3
 MAX_TRIALS = 500
 MOVE_TYPE = 5
@@ -106,7 +108,7 @@ MTSP_MIN_SIZE = 15
 MTSP_MAX_SIZE = {MAX_STOPS_PER_ROUTE}
 POPMUSIC_INITIAL_TOUR = YES
 TIME_LIMIT = 300.0
-MTSP_OBJECTIVE = MINMAX_SIZE  
+MTSP_OBJECTIVE = MINMAX_SIZE
 MTSP_SOLUTION_FILE = {route_filename}
 """
 
