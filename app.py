@@ -36,6 +36,17 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
+def generate_alphabetical_identifier(index):
+    """Generate alphabetical identifier: A, B, ..., Z, AA, AB, etc."""
+    # Calculate how many letters we need
+    if index <= 26:
+        # Single letter (A through Z)
+        return chr(64 + index)  # ASCII: A=65, so we add to 64
+    else:
+        # Multiple letters (AA, AB, etc.)
+        q, r = divmod(index - 1, 26)
+        return chr(65 + q - 1) + chr(65 + r)
+
 # Data Models
 class BusStop(BaseModel):
     id: str
@@ -102,7 +113,7 @@ PATCHING_A = 2 RESTRICTED
 PATCHING_C = 2 RESTRICTED
 INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
 KICKS = 3
-MAX_TRIALS = 500
+MAX_TRIALS = 15
 MOVE_TYPE = 5
 MTSP_MIN_SIZE = 15  
 MTSP_MAX_SIZE = {MAX_STOPS_PER_ROUTE}
@@ -127,7 +138,15 @@ def parse_lkh_output(route_file_path: str, all_points: List) -> List[List[Dict]]
         if line.startswith(('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')):
             route_ids = [item for item in line.split() if item.isdigit()]
             if route_ids:
-                current_route = [{"lat": all_points[int(i)-1].latitude, "lng": all_points[int(i)-1].longitude} for i in route_ids]
+                # Include point_id (bus stop id) along with coordinates
+                current_route = [
+                    {
+                        "lat": all_points[int(i)-1].latitude, 
+                        "lng": all_points[int(i)-1].longitude,
+                        "id": all_points[int(i)-1].id if hasattr(all_points[int(i)-1], 'id') else None
+                    } 
+                    for i in route_ids
+                ]
                 routes.append(current_route)
         elif line.startswith("Cost"):
             continue
@@ -195,31 +214,60 @@ async def optimize_route():
                 continue
 
             for route in cluster_routes:
+                # Calculate priority only for actual stops (not depots)
+                stops_in_route = [point for point in route if point["id"] is not None and point["id"] != depot.id]
+                stops_count = len(stops_in_route)
+                
+                # Find the corresponding BusStop objects to get priorities
+                stop_priorities = []
+                for stop_point in stops_in_route:
+                    for original_stop in cluster_stops:
+                        if original_stop.id == stop_point["id"]:
+                            stop_priorities.append(original_stop.priority)
+                            break
+                
+                # Calculate average priority
+                avg_priority = sum(stop_priorities) / len(stop_priorities) if stop_priorities else 0
+                
                 total_distance = sum(haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"]) for i in range(len(route)-1))
-                stops_count = len(route) - 2
+                
                 routes_info.append({
                     "waypoints": route,
                     "distance": round(total_distance, 2),
                     "duration": int(total_distance * 2),
                     "depot_id": depot_id,
                     "stops_number": stops_count,
-                    "num_vehicles": cluster_vehicles
+                    "num_vehicles": cluster_vehicles,
+                    "avg_priority": round(avg_priority, 2)
                 })
 
+        # These operations should be outside the loops
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
             supabase.table("optimized_routes").delete().eq("id", record["id"]).execute()
 
+        # Group routes by depot_id
+        depot_routes = defaultdict(list)
         for route in routes_info:
-            supabase.table("optimized_routes").insert({
-                "name": f"Optimized Route (Depot {route['depot_id']})",
-                "stops": json.dumps({"waypoints": route['waypoints']}),
-                "distance": route["distance"],
-                "duration": route["duration"],
-                "buses": route["num_vehicles"],
-                "frequency": 1,
-                "stops_number": route["stops_number"]
-            }).execute()
+            depot_routes[route["depot_id"]].append(route)
+
+        # Generate alphabetical identifiers for each depot
+        depot_ids = list(depot_routes.keys())
+        depot_identifiers = {depot_id: generate_alphabetical_identifier(i) 
+                            for i, depot_id in enumerate(depot_ids, start=1)}
+
+        # Insert routes with new naming scheme
+        for depot_id, routes in depot_routes.items():
+            depot_letter = depot_identifiers[depot_id]
+            for route_index, route in enumerate(routes, start=1):
+                route_name = f"{depot_letter}{route_index}"
+                supabase.table("optimized_routes").insert({
+                    "name": route_name,
+                    "stops": json.dumps({"waypoints": route['waypoints']}),
+                    "stops_number": route["stops_number"],
+                    "depot_id" : depot_id,
+                    "avg_priority": route["avg_priority"]
+                }).execute()
         
         end_time = time.time()
         execution_time = end_time - start_time
@@ -233,7 +281,7 @@ async def optimize_route():
     except Exception as e:
         logging.error(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 @app.get("/")
 def read_root():
     return {"message": "Bus Route Optimization API is Running"}
