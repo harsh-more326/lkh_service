@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 import json
 import math
 import logging
-import time  # Import time module
+import time
+import requests
 from collections import defaultdict
 
 # Load environment variables
@@ -25,7 +26,8 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 # Constants
-MAX_STOPS_PER_ROUTE = 50  # Adjust this value as needed
+MAX_STOPS_PER_ROUTE = 35
+OSRM_ROUTING_URL = "http://router.project-osrm.org/route/v1/driving/"
 
 # Haversine formula to calculate distance
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -47,6 +49,37 @@ def generate_alphabetical_identifier(index):
         q, r = divmod(index - 1, 26)
         return chr(65 + q - 1) + chr(65 + r)
 
+# Calculate route distance and duration using OSRM (Leaflet Routing Machine backend)
+def get_osrm_route_data(waypoints):
+    try:
+        # Format waypoints for OSRM API
+        coordinates = ";".join([f"{point['lng']},{point['lat']}" for point in waypoints])
+        url = f"{OSRM_ROUTING_URL}{coordinates}?overview=false"
+        
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data['code'] == 'Ok' and data['routes']:
+                # Convert distance from meters to kilometers
+                distance = data['routes'][0]['distance'] / 1000
+                # Convert duration from seconds to minutes
+                duration = data['routes'][0]['duration'] / 60
+                return round(distance, 2), round(duration, 2)
+        
+        # If API call fails, fall back to haversine calculation
+        logging.warning("OSRM routing failed, falling back to haversine calculation")
+    except Exception as e:
+        logging.error(f"Error with OSRM API: {str(e)}")
+    
+    # Fallback calculation using haversine
+    total_distance = sum(haversine(waypoints[i]["lat"], waypoints[i]["lng"], 
+                                  waypoints[i+1]["lat"], waypoints[i+1]["lng"]) 
+                         for i in range(len(waypoints)-1))
+    # Estimate duration based on distance (assuming avg speed of 30 km/h)
+    estimated_duration = total_distance * 2
+    
+    return round(total_distance, 2), round(estimated_duration, 2)
+
 # Data Models
 class BusStop(BaseModel):
     id: str
@@ -56,12 +89,13 @@ class BusStop(BaseModel):
 
 class Depot(BaseModel):
     id: str
+    name: str
     latitude: float
     longitude: float
     
 def fetch_all_rows(table_name: str):
     all_rows = []
-    chunk_size = 500  # Supabase default limit
+    chunk_size = 500
     start = 0
 
     while True:
@@ -70,7 +104,7 @@ def fetch_all_rows(table_name: str):
             all_rows.extend(response.data)
             start += chunk_size
         else:
-            break  # Stop when no more data
+            break
 
     return all_rows
 
@@ -79,7 +113,6 @@ def assign_stops_to_depots(depots: List[Depot], stops: List[BusStop]) -> Dict[st
     for depot in depots:
         clusters[depot.id] = {"depot": depot, "stops": []}
         logging.info(f"Depot {depot.id} assigned {len(clusters[depot.id]['stops'])} stops")
-
 
     for stop in stops:
         min_dist = float('inf')
@@ -113,7 +146,7 @@ PATCHING_A = 2 RESTRICTED
 PATCHING_C = 2 RESTRICTED
 INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
 KICKS = 3
-MAX_TRIALS = 15
+MAX_TRIALS = 50
 MOVE_TYPE = 5
 MTSP_MIN_SIZE = 15  
 MTSP_MAX_SIZE = {MAX_STOPS_PER_ROUTE}
@@ -226,22 +259,33 @@ async def optimize_route():
                             stop_priorities.append(original_stop.priority)
                             break
                 
-                # Calculate average priority
+                # Calculate average priority, round up (ceiling), and cap at 10
                 avg_priority = sum(stop_priorities) / len(stop_priorities) if stop_priorities else 0
+                avg_priority = min(math.ceil(avg_priority), 10)
                 
-                total_distance = sum(haversine(route[i]["lat"], route[i]["lng"], route[i+1]["lat"], route[i+1]["lng"]) for i in range(len(route)-1))
+                # Get accurate distance and duration using OSRM (Leaflet Routing Machine)
+                distance, duration = get_osrm_route_data(route)
                 
                 routes_info.append({
                     "waypoints": route,
-                    "distance": round(total_distance, 2),
-                    "duration": int(total_distance * 2),
+                    "distance": distance,
+                    "duration": duration,
                     "depot_id": depot_id,
+                    "depot_name": depot.name,
                     "stops_number": stops_count,
                     "num_vehicles": cluster_vehicles,
-                    "avg_priority": round(avg_priority, 2)
+                    "avg_priority": avg_priority
                 })
 
-        # These operations should be outside the loops
+        # Delete existing routes
+        existing_schedule = supabase.table("schedule").select("id").execute()
+        for record in existing_schedule.data:
+            supabase.table("schedule").delete().eq("id", record["id"]).execute()
+        
+        existing_worker = supabase.table("workers").select("id").eq("id", worker_id).execute()
+        for record in existing_worker.data:
+            supabase.table("workers").update({"employee_schedule": None}).eq("id", record["id"]).execute()
+
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
             supabase.table("optimized_routes").delete().eq("id", record["id"]).execute()
@@ -265,8 +309,10 @@ async def optimize_route():
                     "name": route_name,
                     "stops": json.dumps({"waypoints": route['waypoints']}),
                     "stops_number": route["stops_number"],
-                    "depot_id" : depot_id,
-                    "avg_priority": route["avg_priority"]
+                    "avg_priority": route["avg_priority"],
+                    "depot_id": depot_id,
+                    "distance": route["distance"],
+                    "duration": route["duration"]
                 }).execute()
         
         end_time = time.time()

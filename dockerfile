@@ -28,14 +28,17 @@ RUN make
 # Ensure the LKH binary is in the PATH
 RUN ln -s /LKH-3/LKH-3.0.13/LKH /usr/local/bin/LKH
 
-# Create and activate a virtual environment, then install FastAPI & Uvicorn
+# Create and activate a virtual environment, then install dependencies
 WORKDIR /LKH-3/LKH-3.0.13
 RUN python3 -m venv /venv
 RUN /venv/bin/pip install --upgrade pip
 
-# Copy and install Python dependencies from requirements.txt (for better dependency management)
-COPY requirements.txt /LKH-3/LKH-3.0.13/requirements.txt
-RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
+# Set the PATH to ensure the virtual environment is used
+ENV PATH="/venv/bin:$PATH"
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy API script and environment file
 COPY app.py /LKH-3/LKH-3.0.13/app.py
