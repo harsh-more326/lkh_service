@@ -108,6 +108,22 @@ def fetch_all_rows(table_name: str):
 
     return all_rows
 
+def fetch_all_worker_ids():
+    all_worker_ids = []
+    chunk_size = 500
+    start = 0
+
+    while True:
+        response = supabase.table("workers").select("id").range(start, start + chunk_size - 1).execute()
+        if response.data:
+            all_worker_ids.extend(record["id"] for record in response.data)  # Extract only "id"
+            start += chunk_size
+        else:
+            break
+
+    return all_worker_ids
+
+
 def assign_stops_to_depots(depots: List[Depot], stops: List[BusStop]) -> Dict[str, Dict]:
     clusters = {}
     for depot in depots:
@@ -146,7 +162,7 @@ PATCHING_A = 2 RESTRICTED
 PATCHING_C = 2 RESTRICTED
 INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR
 KICKS = 3
-MAX_TRIALS = 50
+MAX_TRIALS = 5
 MOVE_TYPE = 5
 MTSP_MIN_SIZE = 15  
 MTSP_MAX_SIZE = {MAX_STOPS_PER_ROUTE}
@@ -281,10 +297,13 @@ async def optimize_route():
         existing_schedule = supabase.table("schedule").select("id").execute()
         for record in existing_schedule.data:
             supabase.table("schedule").delete().eq("id", record["id"]).execute()
+
         
-        existing_worker = supabase.table("workers").select("id").eq("id", worker_id).execute()
-        for record in existing_worker.data:
-            supabase.table("workers").update({"employee_schedule": None}).eq("id", record["id"]).execute()
+        worker_ids = fetch_all_worker_ids()
+        for worker_id in worker_ids:
+            supabase.table("workers").update({"employee_schedule": None}).eq("id", worker_id).execute()
+            print(f"Cleared schedule for worker {worker_id}")
+
 
         existing_routes = supabase.table("optimized_routes").select("id").execute()
         for record in existing_routes.data:
